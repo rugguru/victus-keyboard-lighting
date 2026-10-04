@@ -1,0 +1,7 @@
+{
+  "upstream_commit": "2816846199328da03f88dd8f3d1b852e5b999058",
+  "upstream_source_url": "https://raw.githubusercontent.com/TUXOV/hp-wmi-fan-and-backlight-control/2816846199328da03f88dd8f3d1b852e5b999058/hp-wmi.c",
+  "upstream_source_sha256": "c07d29f376ff4f172dbe2f5d43e5763c1cb23e96aa5d1ed657b493eaf3804ecc",
+  "stored_baseline_sha256": "c07d29f376ff4f172dbe2f5d43e5763c1cb23e96aa5d1ed657b493eaf3804ecc",
+  "stored_baseline_matches_current_upstream": true
+}

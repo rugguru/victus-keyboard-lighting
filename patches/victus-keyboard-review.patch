@@ -1,0 +1,283 @@
+--- a/hp-wmi.c
++++ b/hp-wmi.c
+@@ -42,9 +42,14 @@
+ #include <linux/version.h>
+ #include <linux/workqueue.h>
+ 
++#ifndef ACPI_AC_CLASS
++#define ACPI_AC_CLASS "ac_adapter"
++#endif
++
+ MODULE_AUTHOR("Matthew Garrett <mjg59@srcf.ucam.org>");
+ MODULE_DESCRIPTION("HP laptop WMI driver");
+ MODULE_LICENSE("GPL");
++MODULE_VERSION("victus-kbd-1.1.0");
+ 
+ MODULE_ALIAS("wmi:95F24279-4D7B-4334-9387-ACCDC67EF61C");
+ MODULE_ALIAS("wmi:5FB7F034-2C63-45E9-BE91-3D44E2C707E4");
+@@ -1758,17 +1763,158 @@
+ 	return err;
+ }
+ 
++/* Victus 16-r0035nt, board 8BBE, BIOS F.31. Fn-only snapshots and a
++ * physical-light test verified that all three controls are required:
++ * EC A1 bit 0, EC 07 four two-bit zone levels, indexed 1832 bit 4.
++ * The BIOS setters acknowledge writes without applying the full state.
++ * Use the EC transport; preserve every unrelated bit and the index selector.
++ * Restrict this empirical quirk to the exact hardware/firmware tested. */
++#define VICTUS_KBD_INDEX_LOW 0x5d
++#define VICTUS_KBD_INDEX_HIGH 0x5e
++#define VICTUS_KBD_INDEX_DATA 0x5f
++#define VICTUS_KBD_OUTPUT_INDEX 0x1832
++#define VICTUS_KBD_OUTPUT_MASK BIT(4)
++#define VICTUS_KBD_MASTER 0xa1
++#define VICTUS_KBD_MASTER_MASK BIT(0)
++#define VICTUS_KBD_ZONE_LEVELS 0x07
++#define VICTUS_KBD_ZONE_ON 0xaa
++#define VICTUS_KBD_INDEX_MUTEX "\\_SB.PC00.LPCB.EC0.FAMX"
++static DEFINE_MUTEX(victus_kbd_gate_lock);
++
++static bool hp_victus_kbd_ec_supported(void)
++{
++	return dmi_match(DMI_BOARD_NAME, "8BBE") &&
++	       dmi_match(DMI_PRODUCT_SKU, "7P6L3EA#AB8") &&
++	       dmi_match(DMI_BIOS_VERSION, "F.31");
++}
++
++/* enabled=-1 reads the complete gate; 0/1 apply an off/on transaction.
++ * The firmware's FAMX mutex also protects its EIDR/EIDW index accesses. */
++static int hp_victus_kbd_ec_gate(int enabled)
++{
++	acpi_status status;
++	u8 index_low, index_high, master, zones, output;
++	u8 new_master, new_zones, new_output, read_master, read_zones, read_output;
++	int ret = -EIO, restore_ret;
++	bool changed = false;
++
++	mutex_lock(&victus_kbd_gate_lock);
++	status = acpi_acquire_mutex(NULL, VICTUS_KBD_INDEX_MUTEX, 1000);
++	if (ACPI_FAILURE(status)) {
++		ret = -EBUSY;
++		goto unlock;
++	}
++	if (ec_read(VICTUS_KBD_INDEX_LOW, &index_low) ||
++	    ec_read(VICTUS_KBD_INDEX_HIGH, &index_high))
++		goto release;
++	if (ec_write(VICTUS_KBD_INDEX_LOW, VICTUS_KBD_OUTPUT_INDEX & 0xff) ||
++	    ec_write(VICTUS_KBD_INDEX_HIGH, VICTUS_KBD_OUTPUT_INDEX >> 8) ||
++	    ec_read(VICTUS_KBD_INDEX_DATA, &output) ||
++	    ec_read(VICTUS_KBD_MASTER, &master) ||
++	    ec_read(VICTUS_KBD_ZONE_LEVELS, &zones))
++		goto restore_index;
++
++	if (enabled < 0) {
++		ret = !!((master & VICTUS_KBD_MASTER_MASK) &&
++			 (zones & 0x03) && (output & VICTUS_KBD_OUTPUT_MASK));
++		goto restore_index;
++	}
++	new_master = enabled ? master | VICTUS_KBD_MASTER_MASK :
++			      master & ~VICTUS_KBD_MASTER_MASK;
++	new_zones = enabled ? VICTUS_KBD_ZONE_ON : 0;
++	new_output = enabled ? output | VICTUS_KBD_OUTPUT_MASK :
++			      output & ~VICTUS_KBD_OUTPUT_MASK;
++	changed = true;
++	if (enabled) {
++		if (ec_write(VICTUS_KBD_MASTER, new_master) ||
++		    ec_write(VICTUS_KBD_ZONE_LEVELS, new_zones) ||
++		    ec_write(VICTUS_KBD_INDEX_DATA, new_output))
++			goto rollback;
++	} else {
++		if (ec_write(VICTUS_KBD_INDEX_DATA, new_output) ||
++		    ec_write(VICTUS_KBD_ZONE_LEVELS, new_zones) ||
++		    ec_write(VICTUS_KBD_MASTER, new_master))
++			goto rollback;
++	}
++	if (ec_read(VICTUS_KBD_MASTER, &read_master) ||
++	    ec_read(VICTUS_KBD_ZONE_LEVELS, &read_zones) ||
++	    ec_read(VICTUS_KBD_INDEX_DATA, &read_output) ||
++	    (read_master & VICTUS_KBD_MASTER_MASK) !=
++		(new_master & VICTUS_KBD_MASTER_MASK) ||
++	    read_zones != new_zones ||
++	    (read_output & VICTUS_KBD_OUTPUT_MASK) !=
++		(new_output & VICTUS_KBD_OUTPUT_MASK))
++		goto rollback;
++	ret = 0;
++	goto restore_index;
++rollback:
++	/* Restore only the fields this transaction owns, keeping unrelated
++	 * master/output bits even if firmware updated them during the write. */
++	if (changed) {
++		if (!ec_read(VICTUS_KBD_INDEX_DATA, &read_output))
++			ec_write(VICTUS_KBD_INDEX_DATA,
++				 (read_output & ~VICTUS_KBD_OUTPUT_MASK) |
++				 (output & VICTUS_KBD_OUTPUT_MASK));
++		ec_write(VICTUS_KBD_ZONE_LEVELS, zones);
++		if (!ec_read(VICTUS_KBD_MASTER, &read_master))
++			ec_write(VICTUS_KBD_MASTER,
++				 (read_master & ~VICTUS_KBD_MASTER_MASK) |
++				 (master & VICTUS_KBD_MASTER_MASK));
++	}
++restore_index:
++	restore_ret = ec_write(VICTUS_KBD_INDEX_LOW, index_low);
++	if (ec_write(VICTUS_KBD_INDEX_HIGH, index_high) || restore_ret)
++		ret = -EIO;
++release:
++	acpi_release_mutex(NULL, VICTUS_KBD_INDEX_MUTEX);
++unlock:
++	mutex_unlock(&victus_kbd_gate_lock);
++	return ret;
++}
++
+ static bool hp_kbd_backlight_is_on(void)
+ {
+ 	u8 data = 0;
+ 	int ret;
+ 
++	if (hp_victus_kbd_ec_supported())
++		return hp_victus_kbd_ec_gate(-1) > 0;
++
+ 	ret = hp_wmi_perform_query(HPWMI_BACKLIGHT_BRIGHTNESS_GET_QUERY, HPWMI_BACKLIGHT, &data,
+-				   sizeof(data), sizeof(data));
++				   zero_if_sup(data), sizeof(data));
+ 	if (ret)
+ 		return false;
+ 
+-	return data == HPWMI_BACKLIGHT_SET_ON_QUERY;
++	return data & BIT(7);
++}
++
++/* Board 8BBE's SSDT13 defines LC05 as the keyboard gate setter. Pass
++ * an explicit buffer so firmware receives the same type it expects.
++ * Do not infer success from LC04: that byte may retain Fn-key state. */
++static int hp_kbd_backlight_gate(bool enabled)
++{
++	u8 data[128] = { 0 };
++	union acpi_object argument;
++	struct acpi_object_list args = { .count = 1, .pointer = &argument };
++	struct acpi_buffer output = { ACPI_ALLOCATE_BUFFER, NULL };
++	acpi_status status;
++	int ret;
++
++	if (hp_victus_kbd_ec_supported())
++		return hp_victus_kbd_ec_gate(enabled);
++
++	data[0] = enabled ? HPWMI_BACKLIGHT_SET_ON_QUERY : HPWMI_BACKLIGHT_SET_OFF_QUERY;
++	ret = hp_wmi_perform_query(HPWMI_BACKLIGHT_BRIGHTNESS_SET_QUERY,
++				   HPWMI_BACKLIGHT, data, sizeof(data), sizeof(u32));
++	if (!dmi_match(DMI_BOARD_NAME, "8BBE"))
++		return ret;
++	data[0] = enabled ? HPWMI_BACKLIGHT_SET_ON_QUERY : HPWMI_BACKLIGHT_SET_OFF_QUERY;
++	argument.type = ACPI_TYPE_BUFFER;
++	argument.buffer.length = sizeof(data);
++	argument.buffer.pointer = data;
++	status = acpi_evaluate_object(NULL, "\\_SB.WMID.LC05", &args, &output);
++	kfree(output.pointer);
++	return ACPI_SUCCESS(status) ? 0 : ret;
+ }
+ 
+ static int hp_kbd_backlight_set_rgb_color(int zone, u8 red, u8 green, u8 blue)
+@@ -1831,28 +1977,20 @@
+ 	int red, green, blue, ret, i;
+ 
+ 	if (brightness == LED_OFF) {
+-		u8 data = HPWMI_BACKLIGHT_SET_OFF_QUERY;
+-
+-		/*
+-		 * Physically turn the backlight off.  Do not touch the color
+-		 * table: the EC keeps the current zone colors and reapplies
+-		 * them when the backlight is turned back on.
+-		 */
+-		ret = hp_wmi_perform_query(HPWMI_BACKLIGHT_BRIGHTNESS_SET_QUERY, HPWMI_BACKLIGHT,
+-					   &data, sizeof(data), sizeof(data));
+-		if (ret)
+-			return ret;
+-
++		/* Try the firmware gate, then guarantee darkness by writing
++		 * zero RGB. Logical subled intensity keeps the chosen color. */
++		ret = hp_kbd_backlight_gate(false);
++		/* Always allow zero RGB even if the hardware gate cannot close. */
++
++		/* Some Victus firmware acknowledges OFF without changing the
++		 * gate. Zero every color component as well so 0 means dark. */
+ 		led_cdev->brightness = brightness;
+-
+-		return 0;
++		led_mc_calc_color_components(mc_cdev, LED_OFF);
++		return hp_kbd_backlight_set_rgb_color(priv->zone, 0, 0, 0);
+ 	}
+ 
+ 	if (!hp_kbd_backlight_is_on()) {
+-		u8 data = HPWMI_BACKLIGHT_SET_ON_QUERY;
+-
+-		ret = hp_wmi_perform_query(HPWMI_BACKLIGHT_BRIGHTNESS_SET_QUERY, HPWMI_BACKLIGHT,
+-					   &data, sizeof(data), sizeof(data));
++		ret = hp_kbd_backlight_gate(true);
+ 		if (ret)
+ 			return ret;
+ 
+@@ -1886,7 +2024,10 @@
+ 	green = mc_cdev->subled_info[1].brightness;
+ 	blue = mc_cdev->subled_info[2].brightness;
+ 
+-	return hp_kbd_backlight_set_rgb_color(priv->zone, red, green, blue);
++	ret = hp_kbd_backlight_set_rgb_color(priv->zone, red, green, blue);
++	if (!ret)
++		priv->last_brightness = brightness;
++	return ret;
+ }
+ 
+ #define HP_KBD_BACKLIGHT_EVENT_OFF	0x0
+@@ -1925,6 +2066,10 @@
+ 		}
+ 
+ 		led_cdev->brightness = brightness;
++		/* Software off writes zero RGB. Reapply the selected colour
++		 * when the physical hotkey turns the light back on. */
++		if (event_data == HP_KBD_BACKLIGHT_EVENT_ON)
++			led_set_brightness(led_cdev, brightness);
+ 		led_classdev_notify_brightness_hw_changed(led_cdev, brightness);
+ 	}
+ }
+@@ -1997,6 +2142,25 @@
+ 
+ 	return 0;
+ }
++
++static ssize_t keyboard_backlight_state_show(struct device *dev,
++                                            struct device_attribute *attr,
++                                            char *buf)
++{
++    u8 data = 0;
++    int ret;
++    if (hp_victus_kbd_ec_supported()) {
++        ret = hp_victus_kbd_ec_gate(-1);
++        return ret < 0 ? ret : sysfs_emit(buf, "%u\n", ret ? 228 : 100);
++    }
++    ret = hp_wmi_perform_query(HPWMI_BACKLIGHT_BRIGHTNESS_GET_QUERY,
++                                  HPWMI_BACKLIGHT, &data,
++                                  zero_if_sup(data), sizeof(data));
++    if (ret)
++        return ret < 0 ? ret : -EIO;
++    return sysfs_emit(buf, "%u\n", data);
++}
++static DEVICE_ATTR_RO(keyboard_backlight_state);
+ 
+ static int hp_kbd_rgb_setup(void)
+ {
+@@ -2939,6 +3103,8 @@
+ #endif
+ 
+ 	err = hp_kbd_rgb_setup();
++	if (!err)
++		device_create_file(&device->dev, &dev_attr_keyboard_backlight_state);
+ 	if (err)
+ 		dev_err(&device->dev, "Failed to initialize keyboard RGB\n");
+ 
+@@ -2947,6 +3113,7 @@
+ 
+ static void __exit hp_wmi_bios_remove(struct platform_device *device)
+ {
++	device_remove_file(&device->dev, &dev_attr_keyboard_backlight_state);
+ 	int i;
+ 	struct hp_wmi_hwmon_priv *priv;
+ 

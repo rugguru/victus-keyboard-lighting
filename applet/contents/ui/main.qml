@@ -1,0 +1,269 @@
+/*
+    SPDX-FileCopyrightText: 2011 Sebastian Kügler <sebas@kde.org>
+    SPDX-FileCopyrightText: 2011 Viranch Mehta <viranch.mehta@gmail.com>
+    SPDX-FileCopyrightText: 2013-2015 Kai Uwe Broulik <kde@privat.broulik.de>
+    SPDX-FileCopyrightText: 2021-2022 ivan tkachenko <me@ratijas.tk>
+    SPDX-FileCopyrightText: 2024 Natalie Clarius <natalie.clarius@kde.org
+
+    SPDX-License-Identifier: LGPL-2.0-or-later
+*/
+
+pragma ComponentBehavior: Bound
+
+import QtQuick
+import QtQuick.Layouts
+
+import org.kde.kcmutils // KCMLauncher
+import org.kde.config // KAuthorized
+import org.kde.plasma.core as PlasmaCore
+import org.kde.plasma.plasmoid
+import org.kde.kirigami as Kirigami
+import org.kde.kitemmodels as KItemModels
+
+import org.kde.plasma.workspace.dbus as DBus
+import org.kde.plasma.private.brightnesscontrolplugin
+
+PlasmoidItem {
+    id: brightnessAndColorControl
+
+    readonly property bool inPanel: (Plasmoid.location === PlasmaCore.Types.TopEdge
+        || Plasmoid.location === PlasmaCore.Types.RightEdge
+        || Plasmoid.location === PlasmaCore.Types.BottomEdge
+        || Plasmoid.location === PlasmaCore.Types.LeftEdge)
+    readonly property bool compactInPanel: inPanel && !!compactRepresentationItem?.visible
+
+    NightLightItem.NightLightControl {
+        id: nightLightControl
+    }
+
+    ScreenBrightnessControl {
+        id: screenBrightnessControl
+        isSilent: brightnessAndColorControl.expanded
+    }
+    DBus.Properties {
+        id: keyboardBridge
+        busType: DBus.BusType.Session
+        service: "org.local.VictusKeyboard"
+        path: "/org/local/VictusKeyboard"
+        iface: "org.local.VictusKeyboard"
+    }
+    VictusKeyboardBrightnessControl {
+        id: keyboardBrightnessControl
+        bridge: keyboardBridge
+    }
+
+    readonly property bool isNightLightActive: nightLightControl.running && nightLightControl.currentTemperature != 6500
+    readonly property bool isNightLightInhibited: nightLightControl.inhibited && nightLightControl.targetTemperature != 6500
+    readonly property int keyboardBrightnessPercent: keyboardBrightnessControl.brightnessMax ? Math.round(100 * keyboardBrightnessControl.brightness / keyboardBrightnessControl.brightnessMax) : 0
+
+    function symbolicizeIconName(iconName) {
+        const symbolicSuffix = "-symbolic";
+        if (iconName.endsWith(symbolicSuffix)) {
+            return iconName;
+        }
+
+        return iconName + symbolicSuffix;
+    }
+
+    switchWidth: Kirigami.Units.gridUnit * 10
+    switchHeight: Kirigami.Units.gridUnit * 10
+
+    Plasmoid.title: i18n("Parlaklık ve Renk")
+
+    LayoutMirroring.enabled: Application.layoutDirection == Qt.RightToLeft
+    LayoutMirroring.childrenInherit: true
+
+    Plasmoid.status: {
+        return screenBrightnessControl.isBrightnessAvailable || keyboardBrightnessControl.isBrightnessAvailable || isNightLightActive || isNightLightInhibited ? PlasmaCore.Types.ActiveStatus : PlasmaCore.Types.PassiveStatus;
+    }
+
+    // QAbstractItemModel doesn't provide bindable properties for QML, let's make sure
+    // toolTipMainText gets updated anyway by (re)setting a variable used in the binding
+    Connections {
+        id: displayModelConnections
+        target: screenBrightnessControl.displays
+        property var screenBrightnessInfo: []
+
+        function update() {
+            const [labelRole, brightnessRole, maxBrightnessRole] = ["label", "brightness", "maxBrightness"].map(
+                (roleName) => target.KItemModels.KRoleNames.role(roleName));
+
+            screenBrightnessInfo = [...Array(target.rowCount()).keys()].map((i) => { // for each display index
+                const modelIndex = target.index(i, 0);
+                return {
+                    label: target.data(modelIndex, labelRole),
+                    brightness: target.data(modelIndex, brightnessRole),
+                    maxBrightness: target.data(modelIndex, maxBrightnessRole),
+                };
+            });
+        }
+        function onDataChanged() { update(); }
+        function onModelReset() { update(); }
+        function onRowsInserted() { update(); }
+        function onRowsMoved() { update(); }
+        function onRowsRemoved() { update(); }
+    }
+    toolTipMainText: {
+        const parts = [];
+        for (const screen of displayModelConnections.screenBrightnessInfo) {
+            const brightnessPercent = screen.maxBrightness ? Math.round(100 * screen.brightness / screen.maxBrightness) : 0
+            const text = displayModelConnections.screenBrightnessInfo.length === 1
+                ? i18n("Ekran parlaklığı %​%1", brightnessPercent)
+                : i18n("%1 parlaklığı %​%2", screen.label, brightnessPercent);
+            parts.push(text);
+        }
+
+        if (keyboardBrightnessControl.isBrightnessAvailable) {
+            parts.push(i18n("Klavye parlaklığı %​%1", keyboardBrightnessPercent));
+        }
+
+        if (nightLightControl.enabled) {
+            if (!nightLightControl.running) {
+                if (nightLightControl.inhibitedFromApplet) {
+                    parts.push(i18n("Gece Işığı askıya alındı; sürdürmek için orta tıklayın"));
+                } else {
+                    parts.push(i18n("Gece Işığı askıya alındı"));
+                }
+            } else if (nightLightControl.currentTemperature != 6500) {
+                if (nightLightControl.currentTemperature == nightLightControl.targetTemperature) {
+                    if (nightLightControl.daylight) {
+                        parts.push(i18n("Gündüz Gece Işığı açık"));
+                    } else {
+                        parts.push(i18n("Gece Işığı açık"));
+                    }
+                } else {
+                    const endTime = new Date(nightLightControl.currentTransitionEndTime).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+                    if (nightLightControl.daylight) {
+                        parts.push(i18n("Sabah geçişinde Gece Işığı (%1 olduğunda tamamlanır)", endTime));
+                    } else {
+                        parts.push(i18n("Akşam geçişinde Gece Işığı (%1 olduğunda tamamlanır)", endTime));
+                    }
+                }
+            }
+        }
+
+        return parts.join("\n");
+    }
+    Connections {
+        target: screenBrightnessControl
+    }
+
+    toolTipSubText: {
+        const parts = [];
+        if (nightLightControl.enabled)
+            if (nightLightControl.currentTemperature == nightLightControl.targetTemperature) {
+                const startTime = new Date(nightLightControl.scheduledTransitionStartTime).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+                if (nightLightControl.daylight) {
+                    parts.push(i18n("Gece Işığı sabah geçişi, %1 için planlandı", startTime));
+                } else {
+                    parts.push(i18n("Gece Işığı akşam geçişi, %1 için planlandı", startTime));
+                }
+            }
+        if (screenBrightnessControl.isBrightnessAvailable) {
+            parts.push(i18n("Ekran parlaklığını ayarlamak için sarın"));
+        }
+        if (nightLightControl.enabled && nightLightControl.running) {
+            parts.push(i18n("Gece Işığı’nı askıya almak için orta tıklayın"));
+        }
+        return parts.join("\n");
+    }
+
+    Plasmoid.icon: {
+        let iconName = "brightness-high";
+
+        if (nightLightControl.enabled) {
+            if (!nightLightControl.running) {
+                iconName = "redshift-status-off";
+            } else if (nightLightControl.currentTemperature != 6500) {
+                if (nightLightControl.daylight) {
+                    iconName = "redshift-status-day";
+                } else {
+                    iconName = "redshift-status-on";
+                }
+            }
+        }
+
+        if (inPanel) {
+            return symbolicizeIconName(iconName);
+        }
+
+        return iconName;
+    }
+
+    compactRepresentation: CompactRepresentation {
+
+        onWheel: wheel => {
+            if (!screenBrightnessControl.isBrightnessAvailable) {
+                return;
+            }
+            const delta = (wheel.inverted ? -1 : 1) * (wheel.angleDelta.y ? wheel.angleDelta.y : -wheel.angleDelta.x);
+
+            if (Math.abs(delta) < 120) {
+                // Touchpad scrolling
+                screenBrightnessControl.adjustBrightnessRatio((delta/120) * 0.05);
+            } else if (wheel.modifiers & Qt.ShiftModifier) {
+                // Discrete/wheel scrolling - round to next small step (e.g. percentage point)
+                screenBrightnessControl.adjustBrightnessStep(
+                    delta < 0 ? ScreenBrightnessControl.DecreaseSmall : ScreenBrightnessControl.IncreaseSmall);
+            } else {
+                // Discrete/wheel scrolling - round to next large step (e.g. 5%, 10%)
+                screenBrightnessControl.adjustBrightnessStep(
+                    delta < 0 ? ScreenBrightnessControl.Decrease : ScreenBrightnessControl.Increase);
+            }
+        }
+
+        acceptedButtons: Qt.LeftButton | Qt.MiddleButton
+        property bool wasExpanded: false
+        Accessible.description: `${toolTipMainText}; ${toolTipSubText}`
+        onPressed: wasExpanded = brightnessAndColorControl.expanded
+        onClicked: mouse => {
+            if (mouse.button == Qt.MiddleButton) {
+                if (nightLightControl.enabled) {
+                    NightLightInhibitor.toggleInhibition();
+                }
+            } else {
+                brightnessAndColorControl.expanded = !wasExpanded;
+            }
+        }
+    }
+
+    fullRepresentation: PopupDialog {
+        id: dialogItem
+
+        readonly property var appletInterface: brightnessAndColorControl
+        screenBrightnessControl: screenBrightnessControl
+        keyboardBrightnessControl: keyboardBrightnessControl
+        nightLightControl: nightLightControl
+
+        Layout.minimumWidth: (brightnessAndColorControl.inPanel && !brightnessAndColorControl.compactInPanel) ? -1 : Kirigami.Units.gridUnit * 10
+        Layout.maximumWidth: Kirigami.Units.gridUnit * 80
+        Layout.preferredWidth: Kirigami.Units.gridUnit * 20
+
+        Layout.minimumHeight: (brightnessAndColorControl.inPanel && !brightnessAndColorControl.compactInPanel) ? -1 : Kirigami.Units.gridUnit * 10
+        Layout.maximumHeight: Kirigami.Units.gridUnit * 40
+        Layout.preferredHeight: (brightnessAndColorControl.inPanel && !brightnessAndColorControl.compactInPanel) ? -1 : implicitHeight
+
+    } // todo
+
+    Plasmoid.contextualActions: [
+        PlasmaCore.Action {
+            id: configureNightLight
+            icon.name: "redshift-status-on"
+            text: i18n("Gece Işığını Yapılandır…")
+            visible: KAuthorized.authorizeControlModule("kcm_nightlight")
+            priority: PlasmaCore.Action.LowPriority
+            onTriggered: KCMLauncher.openSystemSettings("kcm_nightlight")
+        },
+        PlasmaCore.Action {
+            text: i18n("&Güç Yönetimini Yapılandır…")
+            icon.name: "configure"
+            visible: KAuthorized.authorizeControlModule("kcm_powerdevilprofilesconfig")
+            priority: PlasmaCore.Action.LowPriority
+            onTriggered: KCMLauncher.openSystemSettings("kcm_powerdevilprofilesconfig")
+        }
+    ]
+
+    // Remove configure action - applet's config is empty, and it also handles
+    // brightness; replacing with configureNightLight is inappropriate
+    Component.onCompleted: Plasmoid.removeInternalAction("configure")
+}

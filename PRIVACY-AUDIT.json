@@ -1,0 +1,25 @@
+{
+  "status": "passed",
+  "source_selection": "explicit source/document/test allowlist",
+  "known_owner_data_matches": 0,
+  "checked_categories": [
+    "owner_name",
+    "absolute_user_or_workspace_paths",
+    "hostname",
+    "local_user_id",
+    "device_uuid",
+    "mac_address",
+    "ipv4_address"
+  ],
+  "binary_modules_and_caches_included": false,
+  "logs_screenshots_machine_dumps_and_preferences_included": false,
+  "workstation_installers_included": false,
+  "upstream_public_protocol_guid_files": [
+    "driver/hp-wmi.c",
+    "patches/victus-keyboard-review.patch"
+  ],
+  "license_attribution_preserved": true,
+  "archive_metadata_normalized": true,
+  "support_scope": "single tested board/SKU/BIOS; not all Victus models",
+  "external_publication_performed": false
+}

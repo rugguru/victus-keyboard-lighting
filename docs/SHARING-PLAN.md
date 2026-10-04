@@ -1,0 +1,9 @@
+# Publication route
+
+1. Review this source bundle and publish it from a deliberate public project/account identity. Preserve licensing, attribution and AI-assistance disclosure. Do not upload the workstation backup.
+2. Start with the TUXOV driver's issue/PR workflow: https://github.com/TUXOV/hp-wmi-fan-and-backlight-control . The pinned baseline matches its public source. Include the sanitized symptom, narrow scope, unsigned diff and test summary. Ask for review of the exact EC quirk rather than universal Victus support.
+3. Once reviewed and portable packaging is available, propose a DKMS package to interested distribution maintainers. For CachyOS, confirm the appropriate package/maintainer route; its generic distribution tracker explicitly routes upstream package issues upstream: https://github.com/CachyOS/distribution . An Arch/AUR package or Nix integration is a possible later packaging route, not a prepared or approved release in this bundle.
+4. Keep Plasma UI improvements separate from the hp-wmi driver. KDE PowerDevil is the relevant upstream UI project: https://invent.kde.org/plasma/powerdevil . Translation and private-plugin dependencies need review before a broadly usable applet release.
+5. For a Linux mainline submission, rebase onto the relevant hp-wmi maintainer tree and split logical changes. Follow https://docs.kernel.org/process/submitting-patches.html . This review diff alone is not mainline-ready. A known contributor identity and Signed-off-by contact are public, permanently archived submission records. The guide also asks for Assisted-by disclosure. Do not invent a sign-off or attach the device owner's identity without their explicit choice.
+
+Maintainer acceptance, inclusion in a distribution and support for additional models are not guaranteed. No issue, PR, message or upload has been sent by generating this bundle.
